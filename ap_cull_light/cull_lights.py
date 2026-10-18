@@ -17,6 +17,7 @@ from ap_common import (
     NORMALIZED_HEADER_FILENAME,
     NORMALIZED_HEADER_HFR,
     NORMALIZED_HEADER_RMSAC,
+    NORMALIZED_HEADER_TYPE,
     TYPE_LIGHT,
 )
 from ap_common.logging_config import setup_logging
@@ -153,7 +154,7 @@ def cull_lights(
         patterns=[config.INPUT_PATTERN_ALL],
         recursive=True,
         required_properties=required_properties,
-        filters={"type": TYPE_LIGHT},
+        filters={NORMALIZED_HEADER_TYPE: TYPE_LIGHT},
         debug=debug,
         profileFromPath=True,
         printStatus=not quiet,
