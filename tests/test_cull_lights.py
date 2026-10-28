@@ -1040,3 +1040,162 @@ class TestCullLightsQuiet:
         # Verify get_filtered_metadata was called with printStatus=True
         call_kwargs = mock_get_metadata.call_args[1]
         assert call_kwargs["printStatus"] is True
+
+
+class TestReportAndConfirm:
+    """Tests for --report-only-file / --confirm-file non-interactive mode."""
+
+    @staticmethod
+    def _two_dir_metadata(tmp_path):
+        files = {}
+        for name in ("dir1", "dir2"):
+            path = tmp_path / "source" / name / "file.fits"
+            path.parent.mkdir(parents=True)
+            files[str(path)] = {
+                "filename": str(path),
+                "type": "LIGHT",
+                "hfr": 3.0,
+            }
+        return files
+
+    @patch("ap_common.get_filtered_metadata")
+    @patch("ap_cull_light.cull_lights.reject_image")
+    def test_report_only_writes_report_and_rejects_nothing(
+        self, mock_reject, mock_get_metadata, tmp_path
+    ):
+        """Report-only lists every group (auto ones too) and moves no file."""
+        import json
+
+        mock_get_metadata.return_value = self._two_dir_metadata(tmp_path)
+        report_path = tmp_path / "report.json"
+
+        with patch("builtins.input", side_effect=AssertionError("prompted")):
+            cull_lights.cull_lights(
+                source_dir=str(tmp_path / "source"),
+                reject_dir=str(tmp_path / "reject"),
+                max_hfr=2.5,
+                # 100% rejected < 101: every group is auto, still nothing rejected
+                auto_yes_percent=101,
+                report_only_file=str(report_path),
+            )
+
+        mock_reject.assert_not_called()
+        report = json.loads(report_path.read_text())
+        assert sorted(entry["directory"] for entry in report) == ["dir1", "dir2"]
+        assert all(entry["rejected"] == 1 and entry["total"] == 1 for entry in report)
+        assert all(entry["auto"] is True for entry in report)
+
+    @patch("ap_common.get_filtered_metadata")
+    @patch("ap_cull_light.cull_lights.reject_image")
+    def test_report_only_dryrun_writes_nothing(
+        self, mock_reject, mock_get_metadata, tmp_path, capsys
+    ):
+        """Under --dryrun the report is not written; its path is printed."""
+        mock_get_metadata.return_value = self._two_dir_metadata(tmp_path)
+        report_path = tmp_path / "report.json"
+
+        cull_lights.cull_lights(
+            source_dir=str(tmp_path / "source"),
+            reject_dir=str(tmp_path / "reject"),
+            max_hfr=2.5,
+            dryrun=True,
+            report_only_file=str(report_path),
+        )
+
+        assert not report_path.exists()
+        mock_reject.assert_not_called()
+        assert f"[DRYRUN] Would write report to {report_path}" in (
+            capsys.readouterr().out
+        )
+
+    @patch("ap_common.get_filtered_metadata")
+    @patch("ap_cull_light.cull_lights.reject_image")
+    def test_confirmed_dirs_never_prompts(
+        self, mock_reject, mock_get_metadata, tmp_path
+    ):
+        """Only confirmed directories are rejected and input() is never called."""
+        mock_get_metadata.return_value = self._two_dir_metadata(tmp_path)
+
+        with patch("builtins.input", side_effect=AssertionError("prompted")):
+            cull_lights.cull_lights(
+                source_dir=str(tmp_path / "source"),
+                reject_dir=str(tmp_path / "reject"),
+                max_hfr=2.5,
+                confirmed_dirs={"dir1"},
+            )
+
+        assert mock_reject.call_count == 1
+        assert "dir1" in mock_reject.call_args[1]["filepath"]
+
+    @patch("ap_cull_light.cull_lights.cull_lights")
+    def test_main_passes_report_only_and_confirm(self, mock_cull, tmp_path):
+        """main passes the confirm file contents as a set, and the report path."""
+        (tmp_path / "source").mkdir()
+        confirm = tmp_path / "confirm.json"
+        confirm.write_text('["a", "b"]')
+        base = [
+            "cull_lights.py",
+            str(tmp_path / "source"),
+            str(tmp_path / "reject"),
+            "--max-hfr",
+            "2.5",
+        ]
+
+        with patch("sys.argv", [*base, "--confirm-file", str(confirm)]):
+            with pytest.raises(SystemExit) as exc_info:
+                cull_lights.main()
+            assert exc_info.value.code == 0
+        assert mock_cull.call_args[1]["confirmed_dirs"] == {"a", "b"}
+        assert mock_cull.call_args[1]["report_only_file"] is None
+
+        report = str(tmp_path / "r.json")
+        with patch("sys.argv", [*base, "--report-only-file", report]):
+            with pytest.raises(SystemExit):
+                cull_lights.main()
+        assert mock_cull.call_args[1]["report_only_file"] == report
+        assert mock_cull.call_args[1]["confirmed_dirs"] is None
+
+    def test_main_report_only_conflicts_with_confirm(self, tmp_path):
+        """Report-only rejects nothing, so a confirm list is a usage error."""
+        (tmp_path / "source").mkdir()
+        confirm = tmp_path / "confirm.json"
+        confirm.write_text("[]")
+        with patch(
+            "sys.argv",
+            [
+                "cull_lights.py",
+                str(tmp_path / "source"),
+                str(tmp_path / "reject"),
+                "--max-hfr",
+                "2.5",
+                "--confirm-file",
+                str(confirm),
+                "--report-only-file",
+                str(tmp_path / "r.json"),
+            ],
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                cull_lights.main()
+            assert exc_info.value.code == 2
+
+    def test_main_rejects_bad_confirm_file(self, tmp_path):
+        """A confirm file that is not a list of strings is a usage error."""
+        (tmp_path / "source").mkdir()
+        confirm = tmp_path / "confirm.json"
+        confirm.write_text('{"a": 1}')
+
+        with patch(
+            "sys.argv",
+            [
+                "cull_lights.py",
+                str(tmp_path / "source"),
+                str(tmp_path / "reject"),
+                "--max-hfr",
+                "2.5",
+                "--confirm-file",
+                str(confirm),
+            ],
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                cull_lights.main()
+            assert exc_info.value.code == 2
