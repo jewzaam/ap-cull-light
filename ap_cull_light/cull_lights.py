@@ -5,12 +5,13 @@ Main module for culling astrophotography light frames based on FITS header rules
 """
 
 import argparse
+import json
 import logging
 import os
 import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import ap_common
 from ap_common import (
@@ -105,6 +106,15 @@ def reject_image(
             raise
 
 
+def _write_report(path: str, report: List[Dict[str, Any]], dryrun: bool) -> None:
+    """Write the report file, or under dryrun only say where it would go."""
+    if dryrun:
+        print(f"[DRYRUN] Would write report to {path}")
+        return
+    Path(path).write_text(json.dumps(report, indent=2), encoding="utf-8")
+    print(f"Report written to {path}")
+
+
 def cull_lights(
     source_dir: str,
     reject_dir: str,
@@ -115,6 +125,8 @@ def cull_lights(
     debug: bool = False,
     dryrun: bool = False,
     quiet: bool = False,
+    report_only_file: Optional[str] = None,
+    confirmed_dirs: Optional[Set[str]] = None,
 ) -> None:
     """
     Cull light frames based on HFR and RMS thresholds.
@@ -131,6 +143,13 @@ def cull_lights(
         debug: Enable debug output
         dryrun: Perform dry run without actually moving files
         quiet: Suppress progress output
+        report_only_file: If set, reject nothing and never prompt: only write a
+            JSON list of every directory with rejections (directory, rejected,
+            total, percent, auto) to this path. With dryrun the file is not
+            written; the path it would have gone to is printed instead
+        confirmed_dirs: If set, never prompt. Directories at or above the
+            auto-accept threshold are rejected only if listed here (relative
+            to source_dir, as written in the report); others are skipped
     """
     # Print operation summary upfront
     thresholds = []
@@ -258,16 +277,31 @@ def cull_lights(
     overall_count_reject = 0
     files_to_reject: List[str] = []
     rejection_summary: List[Tuple[str, int, int, float]] = []
+    report: List[Dict[str, Any]] = []
 
     for directory, rejected_files, count_reject, count_total in rejection_decisions:
         dir_short = directory.replace(source_dir, "").lstrip(os.sep)
         rejection_percent = 100 * count_reject / count_total
+        auto = auto_yes_percent >= 0 and rejection_percent < auto_yes_percent
+        report.append(
+            {
+                "directory": dir_short,
+                "rejected": count_reject,
+                "total": count_total,
+                "percent": rejection_percent,
+                "auto": auto,
+            }
+        )
+        if report_only_file is not None:
+            continue  # report only: no decisions, nothing rejected
 
         # Determine if we should auto-accept
-        if auto_yes_percent >= 0 and rejection_percent < auto_yes_percent:
+        if auto:
             answer = "y"
         elif dryrun:
             answer = "y"
+        elif confirmed_dirs is not None:
+            answer = "y" if dir_short in confirmed_dirs else "n"
         else:
             # Prompt user
             question = (
@@ -284,6 +318,10 @@ def cull_lights(
             )
         else:
             logger.info(f"Skipped rejection for {dir_short}")
+
+    if report_only_file is not None:
+        _write_report(report_only_file, report, dryrun)
+        return
 
     # Move rejected files with progress
     if files_to_reject:
@@ -411,6 +449,28 @@ def main() -> None:
         ),
     )
 
+    parser.add_argument(
+        "--report-only-file",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Report only: reject nothing and do not prompt; write a JSON list"
+            " of directories with rejections to PATH. With --dryrun, prints"
+            " the path instead of writing it"
+        ),
+    )
+    parser.add_argument(
+        "--confirm-file",
+        type=str,
+        default=None,
+        help=(
+            "JSON list of directories (as named in the report) to reject when"
+            " at or above --auto-accept-percent. Disables prompting; unlisted"
+            " directories are skipped"
+        ),
+    )
+
     parser.add_argument("--debug", action="store_true", help="Enable debug output")
     parser.add_argument(
         "--dryrun", action="store_true", help="Perform dry run without moving files"
@@ -460,6 +520,21 @@ def main() -> None:
             f"Source and reject directories cannot be the same: {args.source_dir}"
         )
 
+    if args.report_only_file and args.confirm_file:
+        parser.error("--report-only-file rejects nothing; it cannot use --confirm-file")
+
+    confirmed_dirs: Optional[Set[str]] = None
+    if args.confirm_file:
+        try:
+            loaded = json.loads(Path(args.confirm_file).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            parser.error(f"Cannot read --confirm-file: {e}")
+        if not isinstance(loaded, list) or not all(
+            isinstance(item, str) for item in loaded
+        ):
+            parser.error("--confirm-file must contain a JSON list of strings")
+        confirmed_dirs = set(loaded)
+
     # Run culling
     cull_lights(
         source_dir=args.source_dir,
@@ -471,6 +546,8 @@ def main() -> None:
         debug=args.debug,
         dryrun=args.dryrun,
         quiet=args.quiet,
+        report_only_file=args.report_only_file,
+        confirmed_dirs=confirmed_dirs,
     )
 
     sys.exit(EXIT_SUCCESS)

@@ -60,6 +60,8 @@ python -m ap_cull_light <source_dir> <reject_dir> --max-hfr 2.5 --max-rms 2.0 --
 - `--max-rms FLOAT`: Maximum RMS in arcsec (reject if RMS > max_rms)
 - `--auto-accept-percent FLOAT`: Auto-accept if rejection percentage is below this (0.0-100.0, default: -1 = always prompt)
 - `--skip-regex REGEX`: Regex pattern to skip files/directories (e.g., 'accept' or 'accept|processed' to skip multiple patterns)
+- `--report-only-file PATH`: Report only: reject nothing and never prompt; write a JSON list of every directory with rejections (`directory`, `rejected`, `total`, `percent`, `auto`) to PATH. With `--dryrun` nothing is written; the tool prints the path it would have written. Cannot be combined with `--confirm-file`
+- `--confirm-file PATH`: Never prompt. PATH holds a JSON list of directories, named as in the `--report-only-file` report; ones at or above `--auto-accept-percent` are rejected only if listed, others are skipped. For running from another program (e.g. ap-workflow)
 - `--debug`: Enable debug output
 - `--dryrun`: Perform dry run without moving files
 - `-q, --quiet`: Suppress progress output
